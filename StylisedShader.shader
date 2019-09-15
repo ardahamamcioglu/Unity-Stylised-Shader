@@ -3,18 +3,39 @@
 	Properties {
 		_Color ("Color", Color) = (1,1,1,1)
 		_MainTex ("Albedo (RGB)", 2D) = "white" {}
-        _ScreenTex ("Shade Filter Texture", 2D) ="white" {}
-		_SpecMap ("Specularity Map",2D) = "white" {}
-		_SpecularSize ("Specular Size",Range(0,1)) = 1
-		_SpecularIntensity ("Specular Intensity",Range(0,1)) = 1 
-		_SpecularAberration ("Specular Aberration",Range(0,1)) = 0
-       _RampSteps ("Lighting Ramp Steps", Range(1,7.99)) = 1
-	   _TexShade ("Texture Shade Intensity",Range(0,1)) = 0
-	   _TexIntensity ("Texture Shape Intensity",Range (0,1)) = 1
-	   _PatternSize("Base Pattern Size",Float) = 100
-	   _RampIntensity("Ramp Intensity",Range(0,1)) = 0
+        _HatchTex ("Hatch Pattern", 2D) ="white" {}
+		_PatternSize("Base Pattern Size",Float) = 100
+		_HatchMap ("Hatch Detail Map",2D) = "white" {}
+		_EmissionMap ("Emission Map",2D) = "black" {}
+		_RoughMap ("Roughness Map",2D) = "white" {}
+		_Roughness ("Roughness",Range(0,1)) = 1
+		_HatchIntensity ("Hatch Intensity",Range(0,1)) = 1
+		_ColorRampIntensity("Color Ramp Intensity",Range(0,1)) = 0
+		_HatchRampIntensity("Hatch Ramp Intensity",Range(0,1)) = 0
+        _RampSteps ("Lighting Ramp Step Count", Range(1,10)) = 1
 	   //_DepthScale ("Pattern Depth Scale",Float) = 5
+
+	   [Toggle]
+	   _ColoredHatch("Colored Hatch",Float) = 0
 	}
+	CGINCLUDE
+	
+	fixed3 Saturation(fixed3 color,fixed saturation)
+    {
+        return saturate(lerp((color.r+color.g+color.b)/3,color,saturation));
+    }
+
+	fixed SmoothHS(fixed input,fixed treshold)
+	{
+		return smoothstep(treshold-0.2,treshold,input);
+	}
+
+	fixed Ramp(fixed input,fixed steps)
+	{
+		return floor(input*steps)/steps;
+	}
+
+	ENDCG
 	SubShader {
 		Tags { "RenderType"="Opaque" "Queue"="Geometry" }
 		LOD 200
@@ -27,10 +48,12 @@
 		#pragma target 3.0
 
 		sampler2D _MainTex;
-		sampler2D _SpecMap;
-       	sampler2D _ScreenTex;
+       	sampler2D _HatchTex;
+		sampler2D _HatchMap;
+		sampler2D _EmissionMap;
+		sampler2D _RoughMap;
 
-		float4 _ScreenTex_ST;
+		float4 _HatchTex_ST;
 
 		struct StylisedSurfaceOutput{
 			fixed3 Albedo;
@@ -38,7 +61,8 @@
     		fixed3 Emission;
     		fixed Alpha;
     		fixed3 Normal;
-			fixed Specular;
+			fixed3 Rough;
+			fixed HatchMap;
 			//fixed3 WorldPos;
 		};
 
@@ -49,35 +73,53 @@
 		};
 
 		fixed4 _Color;
-		fixed _SpecularSize;
-		fixed _SpecularIntensity;
-		fixed _SpecularAberration;
+		fixed _Roughness;
        	fixed _RampSteps;
-	   	fixed _TexShade;
-	   	fixed _TexIntensity;
 		fixed _PatternSize;
-		fixed _RampIntensity;
+		fixed _HatchIntensity;
+		fixed _ColorRampIntensity;
+		fixed _HatchRampIntensity;
 		//fixed _DepthScale;
+
+		fixed _ColoredHatch;
 
        //LIGTHING MODEL
         half4 LightingStylised (StylisedSurfaceOutput s, half3 lightDir, half3 viewDir, half atten) {
 			//DEPTH... IF NEEDED SOMEDAY
 			//half depth = 1-distance(s.WorldPos,_WorldSpaceCameraPos)/_DepthScale;
-			fixed shadeTex = tex2D(_ScreenTex, frac(s.ScreenPos*_PatternSize)).r;
-			_RampSteps = (int)_RampSteps;
-        	half NdotL = dot(s.Normal, lightDir);
-        	half NDLRamp = lerp(pow(NdotL,0.5),round(NdotL*_RampSteps)/_RampSteps-.01,_RampIntensity);
-			half DotRamp = (1-NDLRamp)*_TexIntensity;
-			half ShadeTex = lerp(NDLRamp,step(shadeTex,NDLRamp-DotRamp),_TexShade);
+
+			//DIFFUSE LIGHTING
+			fixed gradientTex = tex2D(_HatchTex, frac(s.ScreenPos*_PatternSize)).r;
+        	fixed NdotL = dot(s.Normal, lightDir);
+			fixed NdotLRamp = Ramp(NdotL,_RampSteps);
+			fixed diff;
+			
 			//SPECULAR LIGTHING
 			fixed3 reflectionDirection = reflect(lightDir,s.Normal);
 			fixed towardsReflection = dot(viewDir,-reflectionDirection);
 			fixed specularChange = fwidth(towardsReflection);
-			fixed spec = smoothstep(1-_SpecularSize,1-_SpecularSize+specularChange,towardsReflection);
-			spec *= _SpecularIntensity;
+			fixed roughness = (_Roughness*s.Rough)*0.5+0.5;
+			fixed spec = smoothstep(1-roughness,1-roughness+specularChange,towardsReflection);
+			spec *= 1-roughness;
+
+			//HATCH TEXTURE
+			fixed hatchDiff = lerp(NdotL,NdotLRamp,_HatchRampIntensity);
+			hatchDiff = saturate(hatchDiff*(4-3*_HatchIntensity));
+			half HatchRamp = SmoothHS(hatchDiff,gradientTex);
+
+			//EXCLUDE HATCH FROM SPEC
+			HatchRamp = max(0.,max(HatchRamp,spec*2)-s.Emission);
+
+			//HATCH INTENSITY
+			HatchRamp = saturate(HatchRamp*(4-3*_HatchIntensity));
+
+			fixed colorDiff = lerp(NdotL,NdotLRamp,_ColorRampIntensity)*0.5+0.5;
+			fixed3 color = Saturation(s.Albedo,2-colorDiff+spec)*colorDiff;
+
         	half4 c;
-        	c.rgb = lerp(ShadeTex,.5+NDLRamp*ceil(lerp(1,towardsReflection,_SpecularAberration)*_LightColor0*(_SpecularSize+1)),spec)*_LightColor0.rgb*s.Albedo*atten;
         	c.a = s.Alpha;
+			color = lerp(color*HatchRamp,Saturation(color,2-HatchRamp)*(HatchRamp*0.75+0.25),_ColoredHatch);
+			c.rgb = color+spec+s.Emission;
         	return c;
         }
 
@@ -88,15 +130,20 @@
         //SURFACE FUNCTION
 	   	void surf (Input i, inout StylisedSurfaceOutput o) {
 			fixed4 c = tex2D (_MainTex, i.uv_MainTex) * _Color;
+			fixed3 r = tex2D(_RoughMap,i.uv_MainTex);
+			fixed h = tex2D(_HatchMap,i.uv_MainTex);
+			fixed3 e = tex2D(_EmissionMap,i.uv_MainTex);
 			o.Albedo = c.rgb;
 			o.Alpha = c.a;
 
 			float aspect = _ScreenParams.x / _ScreenParams.y;
     		o.ScreenPos = i.screenPos.xy / i.screenPos.w;
-    		o.ScreenPos = TRANSFORM_TEX(o.ScreenPos, _ScreenTex);
+    		o.ScreenPos = TRANSFORM_TEX(o.ScreenPos, _HatchTex);
     		o.ScreenPos.x = o.ScreenPos.x * aspect;
 			
-			o.Specular = tex2D(_SpecMap,i.uv_MainTex);
+			o.Rough = r;
+			o.HatchMap = h;
+			o.Emission = e;
 			//o.WorldPos = i.worldPos;
 		}
 		ENDCG
